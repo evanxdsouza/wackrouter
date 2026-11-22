@@ -6,6 +6,7 @@ const PRESETS = [
   { id: 'anthropic', name: 'Anthropic', kind: 'anthropic', base: 'https://api.anthropic.com/v1' },
   { id: 'gemini', name: 'Google Gemini', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai' },
   { id: 'nvidia', name: 'NVIDIA NIM', kind: 'openai', base: 'https://integrate.api.nvidia.com/v1' },
+  { id: 'logfare', name: 'Logfare', kind: 'openai', base: 'https://logfare.ai/v1' },
   { id: 'agentrouter', name: 'AgentRouter', kind: 'anthropic', base: 'https://agentrouter.org/v1' },
   { id: 'openrouter', name: 'OpenRouter', kind: 'openai', base: 'https://openrouter.ai/api/v1' },
   { id: 'groq', name: 'Groq', kind: 'openai', base: 'https://api.groq.com/openai/v1' },

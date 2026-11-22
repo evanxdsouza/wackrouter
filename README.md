@@ -34,6 +34,7 @@ Any OpenAI-compatible service works: pick **Custom** in Add provider, or edit an
 - **Auth style:** Bearer (default), Anthropic `x-api-key`, or **Custom header** (header name plus optional prefix, e.g. `api-key` for Azure-style APIs).
 - **Extra headers:** sent with every request to that provider (`HTTP-Referer`, project ids, gateway keys). Values are encrypted at rest like keys and win over the client's own header of the same name.
 - Everything else the client sends, including `User-Agent`, is forwarded as-is.
+- **Logfare** (free OpenAI-compatible API, `https://logfare.ai/v1`) is a preset too. Its key comes from its own sign-up.
 - **AgentRouter** is a preset (`agentrouter/…`, base `https://agentrouter.org/v1`). It uses `x-api-key` on `/v1/messages` and Bearer on `/chat/completions`. Reported to accept only known coding-agent clients, so point Claude Code, Codex or similar at it through Wackrouter (`ANTHROPIC_BASE_URL=https://your-host/p/agentrouter`) and their own headers reach it unchanged. Plain curl or the Playground may be rejected with "unauthorized client detected".
 
 ## Drains (Logflare and webhooks)
