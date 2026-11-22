@@ -38,6 +38,7 @@ type Logs struct {
 	mu    sync.Mutex
 	items []LogEntry
 	path  string
+	hook  func(LogEntry) // called after each entry is stored (used by drains)
 }
 
 func OpenLogs(path string) *Logs {
@@ -68,6 +69,13 @@ func (l *Logs) rewrite() {
 }
 
 func (l *Logs) Add(e LogEntry) {
+	l.add(e)
+	if l.hook != nil {
+		l.hook(e)
+	}
+}
+
+func (l *Logs) add(e LogEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.items = append(l.items, e)
@@ -176,11 +184,12 @@ func clientToken(r *http.Request) string {
 	return r.Header.Get("X-Goog-Api-Key")
 }
 
-func setAuth(h http.Header, kind, rest, key string) {
+func setAuth(h http.Header, p Provider, extra map[string]string, rest, key string) {
 	h.Del("Authorization")
 	h.Del("X-Api-Key")
 	h.Del("X-Goog-Api-Key")
-	if kind == "anthropic" {
+	switch p.Kind {
+	case "anthropic":
 		h.Set("X-Api-Key", key)
 		if h.Get("Anthropic-Version") == "" {
 			h.Set("Anthropic-Version", "2023-06-01")
@@ -188,9 +197,14 @@ func setAuth(h http.Header, kind, rest, key string) {
 		if strings.HasPrefix(rest, "/chat/completions") { // OpenAI-compat endpoint
 			h.Set("Authorization", "Bearer "+key)
 		}
-		return
+	case "custom":
+		h.Set(p.AuthHeader, p.AuthPrefix+key)
+	default:
+		h.Set("Authorization", "Bearer "+key)
 	}
-	h.Set("Authorization", "Bearer "+key)
+	for k, v := range extra { // provider-level custom headers win over the client's
+		h.Set(k, v)
+	}
 }
 
 func peekModel(body []byte) string {
@@ -307,6 +321,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 	}
 
 	target := prov.BaseURL + rest
+	extra := s.store.HeadersFor(prov)
 	var resp *http.Response
 	var lastErr error
 	for i, k := range keys {
@@ -321,7 +336,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 			}
 			req.Header[name] = vv
 		}
-		setAuth(req.Header, prov.Kind, rest, k.Secret)
+		setAuth(req.Header, prov, extra, rest, k.Secret)
 
 		resp, lastErr = s.client.Do(req)
 		e.Key = k.Label
@@ -432,10 +447,11 @@ func (s *Server) providerModels(ctx context.Context, slug string) ([]string, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	extra := s.store.HeadersFor(prov)
 	var resp *http.Response
 	for _, k := range keys { // first key that answers wins
 		req, _ := http.NewRequestWithContext(ctx, "GET", prov.BaseURL+"/models", nil)
-		setAuth(req.Header, prov.Kind, "/models", k.Secret)
+		setAuth(req.Header, prov, extra, "/models", k.Secret)
 		resp, err = s.client.Do(req)
 		if err != nil {
 			s.store.NoteKey(k.ID, 0, err.Error())

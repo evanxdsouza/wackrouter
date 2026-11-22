@@ -33,13 +33,28 @@ type Key struct {
 	Added   int64  `json:"added"`
 }
 
+// A custom header sent to the provider with every request (value is encrypted at rest).
+type Header struct {
+	Name   string `json:"name"`
+	Secret string `json:"secret"`
+	Hint   string `json:"hint"`
+}
+
+type HeaderIn struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 type Provider struct {
-	ID      string `json:"id"` // slug, used as the model prefix: "openai/gpt-4o"
-	Name    string `json:"name"`
-	Kind    string `json:"kind"` // "openai" (Bearer auth) | "anthropic" (x-api-key)
-	BaseURL string `json:"base_url"`
-	Enabled bool   `json:"enabled"`
-	Keys    []Key  `json:"keys"`
+	ID         string   `json:"id"` // slug, used as the model prefix: "openai/gpt-4o"
+	Name       string   `json:"name"`
+	Kind       string   `json:"kind"` // "openai" (Bearer) | "anthropic" (x-api-key) | "custom" (AuthHeader)
+	BaseURL    string   `json:"base_url"`
+	Enabled    bool     `json:"enabled"`
+	AuthHeader string   `json:"auth_header,omitempty"` // kind=custom: header that carries the key, e.g. api-key
+	AuthPrefix string   `json:"auth_prefix,omitempty"` // kind=custom: text before the key, e.g. "Bearer "
+	Headers    []Header `json:"headers,omitempty"`
+	Keys       []Key    `json:"keys"`
 }
 
 type Token struct {
@@ -58,6 +73,7 @@ type Data struct {
 	Tokens          []Token           `json:"tokens"`
 	Aliases         map[string]string `json:"aliases"`
 	DefaultProvider string            `json:"default_provider"`
+	Sinks           []Sink            `json:"sinks"`
 	PassHash        string            `json:"pass_hash,omitempty"`
 	PassSalt        string            `json:"pass_salt,omitempty"`
 }
@@ -76,6 +92,7 @@ type Store struct {
 	D      Data
 	rr     map[string]uint64
 	ks     map[string]KeyStatus
+	ss     map[string]SinkStatus
 	dirty  bool
 }
 
@@ -98,7 +115,7 @@ func OpenStore(dir string) (*Store, string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, "", err
 	}
-	s := &Store{path: filepath.Join(dir, "wackrouter.json"), rr: map[string]uint64{}, ks: map[string]KeyStatus{}}
+	s := &Store{path: filepath.Join(dir, "wackrouter.json"), rr: map[string]uint64{}, ks: map[string]KeyStatus{}, ss: map[string]SinkStatus{}}
 
 	secret := os.Getenv("WACKROUTER_SECRET")
 	if secret == "" {
@@ -264,12 +281,26 @@ func (s *Store) GetProvider(pid string) (Provider, bool) {
 	return Provider{}, false
 }
 
-func (s *Store) UpsertProvider(p Provider) error {
+var headerNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
+
+var reservedHeaders = map[string]bool{"host": true, "content-length": true, "transfer-encoding": true, "connection": true}
+
+// UpsertProvider creates or updates a provider. hdrs == nil keeps the stored custom
+// headers; a non-nil slice replaces them (an empty value keeps that header's stored value).
+func (s *Store) UpsertProvider(p Provider, hdrs *[]HeaderIn) error {
 	if !slugRe.MatchString(p.ID) {
 		return errors.New("id must be lowercase letters, digits or dashes (max 32)")
 	}
-	if p.Kind != "openai" && p.Kind != "anthropic" {
-		return errors.New("kind must be openai or anthropic")
+	if p.Kind != "openai" && p.Kind != "anthropic" && p.Kind != "custom" {
+		return errors.New("kind must be openai, anthropic or custom")
+	}
+	p.AuthHeader, p.AuthPrefix = strings.TrimSpace(p.AuthHeader), strings.TrimLeft(p.AuthPrefix, "\t\r\n")
+	if p.Kind == "custom" {
+		if !headerNameRe.MatchString(p.AuthHeader) {
+			return errors.New("custom auth needs a header name, like api-key or X-Auth-Token")
+		}
+	} else {
+		p.AuthHeader, p.AuthPrefix = "", ""
 	}
 	p.BaseURL = strings.TrimRight(strings.TrimSpace(p.BaseURL), "/")
 	if !strings.HasPrefix(p.BaseURL, "http://") && !strings.HasPrefix(p.BaseURL, "https://") {
@@ -280,7 +311,45 @@ func (s *Store) UpsertProvider(p Provider) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if i := s.idx(p.ID); i >= 0 {
+	i := s.idx(p.ID)
+	var old []Header
+	if i >= 0 {
+		old = s.D.Providers[i].Headers
+	}
+	p.Headers = old
+	if hdrs != nil {
+		p.Headers = nil
+		seen := map[string]bool{}
+		for _, h := range *hdrs {
+			name := strings.TrimSpace(h.Name)
+			if name == "" {
+				continue
+			}
+			if !headerNameRe.MatchString(name) || reservedHeaders[strings.ToLower(name)] {
+				return errors.New("can't use \"" + name + "\" as a custom header name")
+			}
+			if seen[strings.ToLower(name)] {
+				return errors.New("header \"" + name + "\" is listed twice")
+			}
+			seen[strings.ToLower(name)] = true
+			if h.Value != "" {
+				p.Headers = append(p.Headers, Header{Name: name, Secret: s.enc(h.Value), Hint: last4(h.Value)})
+				continue
+			}
+			kept := false
+			for _, o := range old {
+				if strings.EqualFold(o.Name, name) {
+					o.Name = name
+					p.Headers = append(p.Headers, o)
+					kept = true
+				}
+			}
+			if !kept {
+				return errors.New("header \"" + name + "\" needs a value")
+			}
+		}
+	}
+	if i >= 0 {
 		p.Keys = s.D.Providers[i].Keys
 		s.D.Providers[i] = p
 	} else {
@@ -288,6 +357,17 @@ func (s *Store) UpsertProvider(p Provider) error {
 		s.D.Providers = append(s.D.Providers, p)
 	}
 	return s.save()
+}
+
+// HeadersFor returns the provider's custom headers, decrypted.
+func (s *Store) HeadersFor(p Provider) map[string]string {
+	out := map[string]string{}
+	for _, h := range p.Headers {
+		if v, err := s.dec(h.Secret); err == nil {
+			out[h.Name] = v
+		}
+	}
+	return out
 }
 
 func (s *Store) DeleteProvider(pid string) error {
@@ -534,13 +614,20 @@ type apiKey struct {
 	LastStatus int    `json:"last_status"`
 	LastErr    string `json:"last_err"`
 }
+type apiHeader struct {
+	Name string `json:"name"`
+	Hint string `json:"hint"`
+}
 type apiProvider struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Kind    string   `json:"kind"`
-	BaseURL string   `json:"base_url"`
-	Enabled bool     `json:"enabled"`
-	Keys    []apiKey `json:"keys"`
+	ID         string      `json:"id"`
+	Name       string      `json:"name"`
+	Kind       string      `json:"kind"`
+	BaseURL    string      `json:"base_url"`
+	Enabled    bool        `json:"enabled"`
+	AuthHeader string      `json:"auth_header"`
+	AuthPrefix string      `json:"auth_prefix"`
+	Headers    []apiHeader `json:"headers"`
+	Keys       []apiKey    `json:"keys"`
 }
 type apiToken struct {
 	ID       string `json:"id"`
@@ -556,18 +643,22 @@ type State struct {
 	Tokens    []apiToken        `json:"tokens"`
 	Aliases   map[string]string `json:"aliases"`
 	Default   string            `json:"default_provider"`
+	Sinks     []apiSink         `json:"sinks"`
 	EnvPass   bool              `json:"env_password"`
 }
 
 func (s *Store) Snapshot() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	st := State{Providers: []apiProvider{}, Tokens: []apiToken{}, Aliases: map[string]string{}, Default: s.D.DefaultProvider, EnvPass: os.Getenv("WACKROUTER_PASSWORD") != ""}
+	st := State{Providers: []apiProvider{}, Tokens: []apiToken{}, Aliases: map[string]string{}, Default: s.D.DefaultProvider, EnvPass: os.Getenv("WACKROUTER_PASSWORD") != "", Sinks: s.sinkSnapshot()}
 	for k, v := range s.D.Aliases {
 		st.Aliases[k] = v
 	}
 	for _, p := range s.D.Providers {
-		ap := apiProvider{ID: p.ID, Name: p.Name, Kind: p.Kind, BaseURL: p.BaseURL, Enabled: p.Enabled, Keys: []apiKey{}}
+		ap := apiProvider{ID: p.ID, Name: p.Name, Kind: p.Kind, BaseURL: p.BaseURL, Enabled: p.Enabled, AuthHeader: p.AuthHeader, AuthPrefix: p.AuthPrefix, Headers: []apiHeader{}, Keys: []apiKey{}}
+		for _, h := range p.Headers {
+			ap.Headers = append(ap.Headers, apiHeader{h.Name, h.Hint})
+		}
 		for _, k := range p.Keys {
 			x := s.ks[k.ID]
 			ap.Keys = append(ap.Keys, apiKey{k.ID, k.Label, k.Hint, k.Enabled, k.Added, x.At, x.Status, x.Err})

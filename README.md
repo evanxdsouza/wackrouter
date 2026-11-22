@@ -27,6 +27,23 @@ Then: **Providers** → add one with a key → **Access** → create a token →
 - `/p/<provider>/…` passes a request through untouched, for native APIs. For the Anthropic SDK or Claude Code: `ANTHROPIC_BASE_URL=http://host:8787/p/anthropic`, `ANTHROPIC_API_KEY=<wackrouter token>`.
 - Streaming works. Token counts in Activity are read from the provider's usage fields.
 
+## Custom providers and headers
+
+Any OpenAI-compatible service works: pick **Custom** in Add provider, or edit an existing one.
+
+- **Auth style:** Bearer (default), Anthropic `x-api-key`, or **Custom header** (header name plus optional prefix, e.g. `api-key` for Azure-style APIs).
+- **Extra headers:** sent with every request to that provider (`HTTP-Referer`, project ids, gateway keys). Values are encrypted at rest like keys and win over the client's own header of the same name.
+- Everything else the client sends, including `User-Agent`, is forwarded as-is.
+- **AgentRouter** is a preset (`agentrouter/…`, base `https://agentrouter.org/v1`). It uses `x-api-key` on `/v1/messages` and Bearer on `/chat/completions`. Reported to accept only known coding-agent clients, so point Claude Code, Codex or similar at it through Wackrouter (`ANTHROPIC_BASE_URL=https://your-host/p/agentrouter`) and their own headers reach it unchanged. Plain curl or the Playground may be rejected with "unauthorized client detected".
+
+## Drains (Logflare and webhooks)
+
+Settings → **Drains** ships one event per request, batched every couple of seconds, one retry, never blocking the request path.
+
+- **Logflare:** `POST {url}/api/logs?source=<uuid>` (or `source_name=`), `X-API-KEY` header, body `{"batch":[{"message","timestamp","metadata":{"wackrouter":{…}}}]}`. Set the URL to your own host for self-hosted Logflare.
+- **Webhook:** a JSON array of flat events, with an optional `Authorization` header value.
+- Fields: who, provider, model, path, key label, status, latency_ms, tokens_in, tokens_out, stream, error. Prompts, replies and keys are never sent.
+
 ## Config (environment)
 
 | Variable | Default | Purpose |

@@ -6,6 +6,7 @@ const PRESETS = [
   { id: 'anthropic', name: 'Anthropic', kind: 'anthropic', base: 'https://api.anthropic.com/v1' },
   { id: 'gemini', name: 'Google Gemini', kind: 'openai', base: 'https://generativelanguage.googleapis.com/v1beta/openai' },
   { id: 'nvidia', name: 'NVIDIA NIM', kind: 'openai', base: 'https://integrate.api.nvidia.com/v1' },
+  { id: 'agentrouter', name: 'AgentRouter', kind: 'anthropic', base: 'https://agentrouter.org/v1' },
   { id: 'openrouter', name: 'OpenRouter', kind: 'openai', base: 'https://openrouter.ai/api/v1' },
   { id: 'groq', name: 'Groq', kind: 'openai', base: 'https://api.groq.com/openai/v1' },
   { id: 'together', name: 'Together AI', kind: 'openai', base: 'https://api.together.xyz/v1' },
@@ -16,6 +17,12 @@ const PRESETS = [
   { id: 'fireworks', name: 'Fireworks', kind: 'openai', base: 'https://api.fireworks.ai/inference/v1' },
   { id: 'perplexity', name: 'Perplexity', kind: 'openai', base: 'https://api.perplexity.ai' },
   { id: 'ollama', name: 'Ollama (local)', kind: 'openai', base: 'http://localhost:11434/v1' },
+  { id: 'custom', name: 'Custom', kind: 'custom', base: '', auth_header: 'Authorization', auth_prefix: 'Bearer ' },
+];
+
+const SINK_PRESETS = [
+  { id: 'logflare', name: 'Logflare', type: 'logflare', url: 'https://api.logflare.app' },
+  { id: 'webhook', name: 'Webhook', type: 'webhook', url: '' },
 ];
 
 const $app = document.getElementById('app');
@@ -133,12 +140,13 @@ const NAV = [
   ['access', 'Access', () => S.tokens.length],
   ['playground', 'Playground'],
   ['activity', 'Activity'],
+  ['drains', 'Drains', () => S.sinks.length],
   ['settings', 'Settings'],
 ];
 
 function render() {
   clearInterval(pollTimer);
-  const views = { providers: pageProviders, access: pageAccess, playground: pagePlayground, activity: pageActivity, settings: pageSettings };
+  const views = { providers: pageProviders, access: pageAccess, playground: pagePlayground, activity: pageActivity, drains: pageDrains, settings: pageSettings };
   const view = (views[page] || pageProviders)();
   $app.replaceChildren(h('div', { class: 'shell' },
     h('aside', { class: 'rail' },
@@ -249,13 +257,16 @@ function providerRow(p) {
       h('div', { class: 'prov-title' },
         h('div', { class: 'name' }, p.name, !p.enabled && h('span', { class: 'chip' }, 'Off'),
           S.default_provider === p.id && h('span', { class: 'chip warn' }, 'Default')),
-        h('div', { class: 'sub' }, h('code', null, p.id + '/'), ' on ', p.base_url)),
+        h('div', { class: 'sub' }, h('code', null, p.id + '/'), ' on ', p.base_url),
+        (p.kind === 'custom' || p.headers.length) ? h('div', { class: 'row small', style: 'margin-top:4px;gap:6px' },
+          p.kind === 'custom' && h('span', { class: 'chip' }, 'Key in ' + p.auth_header),
+          p.headers.length > 0 && h('span', { class: 'chip', title: p.headers.map(x => x.name).join(', ') }, p.headers.length + ' custom header' + (p.headers.length === 1 ? '' : 's'))) : null),
       h('div', { class: 'bits', title: p.keys.length + ' key' + (p.keys.length === 1 ? '' : 's'), role: 'img', 'aria-label': p.keys.length + ' keys' },
         p.keys.map(k => h('i', { class: keyState(k).cls }))),
       h('div', { class: 'row' },
         test,
         h('button', { class: 'btn quiet', onclick: () => providerDialog(p) }, 'Edit'),
-        h('button', { class: 'btn quiet', onclick: () => act(() => api('PUT', `/providers/${p.id}`, { name: p.name, kind: p.kind, base_url: p.base_url, enabled: !p.enabled })) }, p.enabled ? 'Turn off' : 'Turn on'),
+        h('button', { class: 'btn quiet', onclick: () => act(() => api('PUT', `/providers/${p.id}`, { name: p.name, kind: p.kind, base_url: p.base_url, enabled: !p.enabled, auth_header: p.auth_header, auth_prefix: p.auth_prefix })) }, p.enabled ? 'Turn off' : 'Turn on'),
         h('button', { class: 'btn quiet danger', onclick: () => { if (confirm(`Delete ${p.name} and all its keys?`)) act(() => api('DELETE', `/providers/${p.id}`), 'Provider deleted'); } }, 'Delete'))),
     h('div', { class: 'keys' },
       keyRows.length ? keyRows : h('div', { class: 'keyrow muted' }, 'No keys yet. Add one below.'),
@@ -273,7 +284,23 @@ function providerDialog(existing, preset) {
   const base = h('input', { type: 'url', value: v.base_url || v.base || '', required: true, placeholder: 'https://api.example.com/v1' });
   const kind = h('select', null,
     h('option', { value: 'openai', selected: v.kind === 'openai' }, 'OpenAI-compatible (Bearer key)'),
-    h('option', { value: 'anthropic', selected: v.kind === 'anthropic' }, 'Anthropic (x-api-key)'));
+    h('option', { value: 'anthropic', selected: v.kind === 'anthropic' }, 'Anthropic (x-api-key)'),
+    h('option', { value: 'custom', selected: v.kind === 'custom' }, 'Custom header'));
+  const authName = h('input', { type: 'text', class: 'mono', value: v.auth_header || '', placeholder: 'api-key', autocomplete: 'off' });
+  const authPrefix = h('input', { type: 'text', class: 'mono', value: v.auth_prefix || '', placeholder: 'Bearer  (optional, keep the trailing space)', autocomplete: 'off' });
+  const authBox = h('div', { class: 'row', style: 'align-items:flex-start' },
+    h('label', { class: 'field grow' }, h('span', null, 'Header name'), authName),
+    h('label', { class: 'field grow' }, h('span', null, 'Text before the key'), authPrefix));
+  const syncAuth = () => { authBox.style.display = kind.value === 'custom' ? '' : 'none'; };
+  kind.addEventListener('change', syncAuth); syncAuth();
+
+  const hdrs = (existing ? existing.headers : []).map(x => ({ name: x.name, value: '', hint: x.hint, had: true }));
+  const hdrBox = h('div');
+  const paintHdrs = () => hdrBox.replaceChildren(...hdrs.map((r, i) => h('div', { class: 'alias' },
+    h('input', { type: 'text', class: 'mono', placeholder: 'X-Header-Name', value: r.name, 'aria-label': 'Header name', autocomplete: 'off', oninput: e => { r.name = e.target.value; } }),
+    h('input', { type: 'password', class: 'mono', placeholder: r.had ? '•••• ' + r.hint + ' (blank keeps it)' : 'value', 'aria-label': 'Header value', autocomplete: 'off', oninput: e => { r.value = e.target.value; } }),
+    h('button', { type: 'button', class: 'btn quiet danger', onclick: () => { hdrs.splice(i, 1); paintHdrs(); } }, 'Remove'))));
+  paintHdrs();
   const key = h('input', { type: 'password', autocomplete: 'off', placeholder: editing ? 'Add another key (optional)' : 'Paste API key' });
   let idTouched = editing || !!preset;
   id.addEventListener('input', () => { idTouched = true; });
@@ -282,7 +309,7 @@ function providerDialog(existing, preset) {
   const picks = h('div', { class: 'presetpick' });
   const paintPicks = () => picks.replaceChildren(...PRESETS.map(p => h('button', {
     type: 'button', class: 'btn', 'aria-pressed': String(id.value === p.id && base.value === p.base),
-    onclick: () => { name.value = p.name; id.value = p.id; base.value = p.base; kind.value = p.kind; idTouched = true; paintPicks(); key.focus(); },
+    onclick: () => { name.value = p.name; id.value = p.id; base.value = p.base; kind.value = p.kind; authName.value = p.auth_header || ''; authPrefix.value = p.auth_prefix || ''; syncAuth(); idTouched = true; paintPicks(); (p.base ? key : base).focus(); },
   }, p.name)));
   paintPicks();
 
@@ -290,7 +317,7 @@ function providerDialog(existing, preset) {
     onsubmit: async e => {
       e.preventDefault();
       try {
-        await api('PUT', `/providers/${id.value}`, { name: name.value, kind: kind.value, base_url: base.value, enabled: editing ? existing.enabled : true, key: key.value, key_label: '' });
+        await api('PUT', `/providers/${id.value}`, { name: name.value, kind: kind.value, base_url: base.value, enabled: editing ? existing.enabled : true, auth_header: authName.value, auth_prefix: authPrefix.value, headers: hdrs.filter(r => r.name.trim()).map(r => ({ name: r.name, value: r.value })), key: key.value, key_label: '' });
         dlg.close(); toast(editing ? 'Provider saved' : 'Provider added. Wack!'); await refresh();
       } catch (err) { toast(err.message, true); }
     },
@@ -302,6 +329,11 @@ function providerDialog(existing, preset) {
       h('span', { class: 'muted small', style: 'font-weight:400' }, 'Models are addressed as prefix/model-name.')),
     h('label', { class: 'field' }, h('span', null, 'Base URL'), base),
     h('label', { class: 'field' }, h('span', null, 'Auth style'), kind),
+    authBox,
+    h('div', { class: 'field' }, h('span', null, 'Extra headers'),
+      h('span', { class: 'muted small', style: 'font-weight:400' }, 'Sent with every request to this provider, for things like HTTP-Referer, project ids or gateway keys. Values are encrypted.'),
+      hdrBox,
+      h('div', null, h('button', { type: 'button', class: 'btn', onclick: () => { hdrs.push({ name: '', value: '', hint: '', had: false }); paintHdrs(); } }, 'Add header'))),
     h('label', { class: 'field' }, h('span', null, 'API key'), key),
     h('div', { class: 'row', style: 'justify-content:flex-end' },
       h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel'),
@@ -526,6 +558,100 @@ function pageActivity() {
     h('div', { class: 'toolbar' }, provSel, h('label', { class: 'row small', for: 'errs' }, errBox, 'Errors only')),
     table,
   ];
+}
+
+/* ---------- drains ---------- */
+function sinkState(k) {
+  if (!k.enabled) return ['', 'Off'];
+  if (!k.sent && !k.failed) return ['', 'Waiting for requests'];
+  if (k.last_fail > k.last_ok) return ['bad', 'Failing'];
+  return ['ok', 'Shipping'];
+}
+
+function pageDrains() {
+  const out = [h('div', { class: 'page-head' },
+    h('div', null, h('h1', null, 'Drains'),
+      h('p', { class: 'muted' }, 'Ship every request to Logflare or your own webhook. Only metadata goes out: never prompts, replies or keys.')),
+    h('button', { class: 'btn primary', onclick: () => sinkDialog() }, 'Add drain'))];
+  if (!S.sinks.length) {
+    out.push(h('div', { class: 'panel empty' }, mascot(),
+      h('h2', null, 'Nowhere to drain yet'),
+      h('p', { class: 'muted' }, 'Point it at a Logflare source and every request shows up there within a couple of seconds.'),
+      h('div', { class: 'presets' }, SINK_PRESETS.map(p => h('button', { class: 'btn', onclick: () => sinkDialog(null, p) }, p.name)))));
+  }
+  S.sinks.forEach(k => {
+    const st = sinkState(k);
+    const test = h('button', { class: 'btn' }, 'Send test');
+    test.addEventListener('click', async () => {
+      test.disabled = true;
+      try { const r = await api('POST', `/sinks/${k.id}/test`); toast(r.ok ? `${k.name} accepted the test event (${r.ms} ms)` : `${k.name} failed: ${r.error}`, !r.ok); }
+      catch (e) { toast(e.message, true); }
+      test.disabled = false; refresh();
+    });
+    out.push(h('section', { class: 'panel prov' + (k.enabled ? '' : ' off') },
+      h('div', { class: 'prov-head' },
+        h('div', { class: 'tile', 'aria-hidden': 'true' }, k.name.slice(0, 1).toUpperCase()),
+        h('div', { class: 'prov-title' },
+          h('div', { class: 'name' }, k.name, h('span', { class: 'chip ' + st[0], title: k.last_err || '' }, st[1])),
+          h('div', { class: 'sub' }, k.type === 'logflare' ? ['Logflare source ', h('code', null, k.source), ' at ', k.url] : ['Webhook ', h('code', null, k.url)]),
+          h('div', { class: 'sub' }, `${k.sent.toLocaleString()} sent` + (k.failed ? `, ${k.failed.toLocaleString()} failed` : '') + (k.last_ok ? ', last delivery ' + ago(k.last_ok) : ''),
+            k.last_fail > k.last_ok && k.last_err ? h('div', { style: 'color:var(--bad)' }, k.last_err) : null)),
+        h('div', { class: 'row' }, test,
+          h('button', { class: 'btn quiet', onclick: () => sinkDialog(k) }, 'Edit'),
+          h('button', { class: 'btn quiet', onclick: () => act(() => api('PATCH', `/sinks/${k.id}`, { enabled: !k.enabled })) }, k.enabled ? 'Turn off' : 'Turn on'),
+          h('button', { class: 'btn quiet danger', onclick: () => { if (confirm(`Delete the ${k.name} drain?`)) act(() => api('DELETE', `/sinks/${k.id}`), 'Drain deleted'); } }, 'Delete')))));
+  });
+  return out;
+}
+
+function sinkDialog(existing, preset) {
+  const editing = !!existing;
+  const v = existing || preset || { id: '', name: '', type: 'logflare', url: 'https://api.logflare.app' };
+  const name = h('input', { type: 'text', value: v.name || '', required: true, autocomplete: 'off' });
+  const id = h('input', { type: 'text', value: v.id || '', required: true, pattern: '[a-z0-9][a-z0-9\\-]{0,31}', readonly: editing, autocomplete: 'off' });
+  const type = h('select', null,
+    h('option', { value: 'logflare', selected: v.type === 'logflare' }, 'Logflare'),
+    h('option', { value: 'webhook', selected: v.type === 'webhook' }, 'Webhook (JSON)'));
+  const url = h('input', { type: 'url', value: v.url || '', required: true });
+  const source = h('input', { type: 'text', class: 'mono', value: v.source || '', placeholder: 'Source UUID or name', autocomplete: 'off' });
+  const key = h('input', { type: 'password', autocomplete: 'off' });
+  const urlLabel = h('span'), keyLabel = h('span'), keyNote = h('span', { class: 'muted small', style: 'font-weight:400' });
+  const sourceBox = h('label', { class: 'field' }, h('span', null, 'Source'), source);
+  const sync = () => {
+    const lf = type.value === 'logflare';
+    urlLabel.textContent = lf ? 'Logflare URL' : 'Webhook URL';
+    keyLabel.textContent = lf ? 'Ingest API key' : 'Authorization header (optional)';
+    keyNote.textContent = lf ? 'Use the self-hosted address here if you run your own Logflare.' : 'Sent as-is, for example Bearer abc123. Events arrive as a JSON array.';
+    key.placeholder = editing && v.hint ? '•••• ' + v.hint + ' (blank keeps it)' : (lf ? 'Paste API key' : 'Bearer …');
+    key.required = lf && !(editing && v.hint);
+    sourceBox.style.display = lf ? '' : 'none';
+    source.required = lf;
+  };
+  type.addEventListener('change', () => { if (type.value === 'logflare' && !url.value) url.value = 'https://api.logflare.app'; sync(); });
+  sync();
+  const dlg = h('dialog', null, h('form', {
+    onsubmit: async e => {
+      e.preventDefault();
+      try {
+        await api('PUT', `/sinks/${id.value}`, { name: name.value, type: type.value, url: url.value, source: source.value, key: key.value, enabled: editing ? existing.enabled : true });
+        dlg.close(); toast(editing ? 'Drain saved' : 'Drain added. It starts with the next request.'); await refresh();
+      } catch (err) { toast(err.message, true); }
+    },
+  },
+    h('h2', null, editing ? 'Edit ' + existing.name : 'Add drain'),
+    h('label', { class: 'field' }, h('span', null, 'Name'), name),
+    h('label', { class: 'field' }, h('span', null, 'Short id'), id),
+    h('label', { class: 'field' }, h('span', null, 'Type'), type),
+    h('label', { class: 'field' }, urlLabel, url),
+    sourceBox,
+    h('label', { class: 'field' }, keyLabel, key, keyNote),
+    h('div', { class: 'row', style: 'justify-content:flex-end' },
+      h('button', { class: 'btn', type: 'button', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { class: 'btn primary', type: 'submit' }, editing ? 'Save changes' : 'Add drain'))));
+  name.addEventListener('input', () => { if (!editing && !id.dataset.t) id.value = slugify(name.value); });
+  id.addEventListener('input', () => { id.dataset.t = '1'; });
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg); dlg.showModal(); name.focus();
 }
 
 /* ---------- settings ---------- */

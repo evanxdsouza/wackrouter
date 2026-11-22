@@ -20,6 +20,7 @@ var webFS embed.FS
 type Server struct {
 	store  *Store
 	logs   *Logs
+	ship   *Shipper
 	client *http.Client
 	mcMu   sync.Mutex
 	mc     *modelsCache
@@ -61,6 +62,8 @@ func main() {
 		}},
 		fails: map[string]*failInfo{},
 	}
+	s.ship = NewShipper(st, s.client)
+	s.logs.hook = s.ship.Enqueue
 	go func() {
 		for range time.Tick(30 * time.Second) {
 			st.Flush()
@@ -94,6 +97,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/providers/{id}/keys/{kid}", a(s.apiPatchKey))
 	mux.HandleFunc("DELETE /api/providers/{id}/keys/{kid}", a(s.apiDelKey))
 	mux.HandleFunc("POST /api/providers/{id}/test", a(s.apiTest))
+	mux.HandleFunc("PUT /api/sinks/{id}", a(s.apiPutSink))
+	mux.HandleFunc("PATCH /api/sinks/{id}", a(s.apiPatchSink))
+	mux.HandleFunc("DELETE /api/sinks/{id}", a(s.apiDelSink))
+	mux.HandleFunc("POST /api/sinks/{id}/test", a(s.apiTestSink))
 	mux.HandleFunc("POST /api/tokens", a(s.apiNewToken))
 	mux.HandleFunc("PATCH /api/tokens/{id}", a(s.apiPatchToken))
 	mux.HandleFunc("DELETE /api/tokens/{id}", a(s.apiDelToken))
@@ -222,19 +229,23 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiPutProvider(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Name     string `json:"name"`
-		Kind     string `json:"kind"`
-		BaseURL  string `json:"base_url"`
-		Enabled  bool   `json:"enabled"`
-		Key      string `json:"key"`
-		KeyLabel string `json:"key_label"`
+		Name       string      `json:"name"`
+		Kind       string      `json:"kind"`
+		BaseURL    string      `json:"base_url"`
+		Enabled    bool        `json:"enabled"`
+		AuthHeader string      `json:"auth_header"`
+		AuthPrefix string      `json:"auth_prefix"`
+		Headers    *[]HeaderIn `json:"headers"`
+		Key        string      `json:"key"`
+		KeyLabel   string      `json:"key_label"`
 	}
 	if readJSON(r, &in) != nil {
 		jsonErr(w, 400, "bad json")
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.store.UpsertProvider(Provider{ID: id, Name: in.Name, Kind: in.Kind, BaseURL: in.BaseURL, Enabled: in.Enabled}); err != nil {
+	p := Provider{ID: id, Name: in.Name, Kind: in.Kind, BaseURL: in.BaseURL, Enabled: in.Enabled, AuthHeader: in.AuthHeader, AuthPrefix: in.AuthPrefix}
+	if err := s.store.UpsertProvider(p, in.Headers); err != nil {
 		jsonErr(w, 400, err.Error())
 		return
 	}
@@ -400,4 +411,59 @@ func (s *Server) apiChat(w http.ResponseWriter, r *http.Request) {
 	r2.URL.RawQuery = ""
 	r2.Header = http.Header{"Content-Type": {"application/json"}}
 	s.serve(w, r2, "playground")
+}
+
+// ---- drains -------------------------------------------------------------------------
+
+func (s *Server) apiPutSink(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name    string `json:"name"`
+		Type    string `json:"type"`
+		URL     string `json:"url"`
+		Source  string `json:"source"`
+		Key     string `json:"key"`
+		Enabled bool   `json:"enabled"`
+	}
+	if readJSON(r, &in) != nil {
+		jsonErr(w, 400, "bad json")
+		return
+	}
+	k := Sink{ID: r.PathValue("id"), Name: in.Name, Type: in.Type, URL: in.URL, Source: in.Source, Enabled: in.Enabled}
+	if err := s.store.UpsertSink(k, in.Key); err != nil {
+		jsonErr(w, 400, err.Error())
+		return
+	}
+	jsonOut(w, ok{})
+}
+
+func (s *Server) apiPatchSink(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if readJSON(r, &in) != nil {
+		jsonErr(w, 400, "bad json")
+		return
+	}
+	if err := s.store.SetSinkEnabled(r.PathValue("id"), in.Enabled); err != nil {
+		jsonErr(w, 404, err.Error())
+		return
+	}
+	jsonOut(w, ok{})
+}
+
+func (s *Server) apiDelSink(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteSink(r.PathValue("id")); err != nil {
+		jsonErr(w, 404, err.Error())
+		return
+	}
+	jsonOut(w, ok{})
+}
+
+func (s *Server) apiTestSink(w http.ResponseWriter, r *http.Request) {
+	ms, err := s.ship.Test(r.PathValue("id"))
+	res := map[string]any{"ok": err == nil, "ms": ms}
+	if err != nil {
+		res["error"] = err.Error()
+	}
+	jsonOut(w, res)
 }
