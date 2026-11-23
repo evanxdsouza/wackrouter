@@ -54,6 +54,7 @@ type Provider struct {
 	AuthHeader string   `json:"auth_header,omitempty"` // kind=custom: header that carries the key, e.g. api-key
 	AuthPrefix string   `json:"auth_prefix,omitempty"` // kind=custom: text before the key, e.g. "Bearer "
 	Headers    []Header `json:"headers,omitempty"`
+	Models     []string `json:"models,omitempty"` // allowlist; empty means every model the provider offers
 	Keys       []Key    `json:"keys"`
 }
 
@@ -287,7 +288,7 @@ var reservedHeaders = map[string]bool{"host": true, "content-length": true, "tra
 
 // UpsertProvider creates or updates a provider. hdrs == nil keeps the stored custom
 // headers; a non-nil slice replaces them (an empty value keeps that header's stored value).
-func (s *Store) UpsertProvider(p Provider, hdrs *[]HeaderIn) error {
+func (s *Store) UpsertProvider(p Provider, hdrs *[]HeaderIn, models *[]string) error {
 	if !slugRe.MatchString(p.ID) {
 		return errors.New("id must be lowercase letters, digits or dashes (max 32)")
 	}
@@ -317,6 +318,19 @@ func (s *Store) UpsertProvider(p Provider, hdrs *[]HeaderIn) error {
 		old = s.D.Providers[i].Headers
 	}
 	p.Headers = old
+	if i >= 0 {
+		p.Models = s.D.Providers[i].Models
+	}
+	if models != nil {
+		p.Models = nil
+		seen := map[string]bool{}
+		for _, m := range *models {
+			if m = strings.TrimSpace(m); m != "" && !seen[m] {
+				seen[m] = true
+				p.Models = append(p.Models, m)
+			}
+		}
+	}
 	if hdrs != nil {
 		p.Headers = nil
 		seen := map[string]bool{}
@@ -627,6 +641,7 @@ type apiProvider struct {
 	AuthHeader string      `json:"auth_header"`
 	AuthPrefix string      `json:"auth_prefix"`
 	Headers    []apiHeader `json:"headers"`
+	Models     []string    `json:"models"`
 	Keys       []apiKey    `json:"keys"`
 }
 type apiToken struct {
@@ -655,7 +670,7 @@ func (s *Store) Snapshot() State {
 		st.Aliases[k] = v
 	}
 	for _, p := range s.D.Providers {
-		ap := apiProvider{ID: p.ID, Name: p.Name, Kind: p.Kind, BaseURL: p.BaseURL, Enabled: p.Enabled, AuthHeader: p.AuthHeader, AuthPrefix: p.AuthPrefix, Headers: []apiHeader{}, Keys: []apiKey{}}
+		ap := apiProvider{ID: p.ID, Name: p.Name, Kind: p.Kind, BaseURL: p.BaseURL, Enabled: p.Enabled, AuthHeader: p.AuthHeader, AuthPrefix: p.AuthPrefix, Headers: []apiHeader{}, Models: append([]string{}, p.Models...), Keys: []apiKey{}}
 		for _, h := range p.Headers {
 			ap.Headers = append(ap.Headers, apiHeader{h.Name, h.Hint})
 		}
@@ -669,4 +684,19 @@ func (s *Store) Snapshot() State {
 		st.Tokens = append(st.Tokens, apiToken{t.ID, t.Name, t.Hint, t.Enabled, t.Created, t.LastUsed, t.Requests})
 	}
 	return st
+}
+
+// AllowedModels returns the provider's model allowlist as a set, or nil when every model is allowed.
+func (s *Store) AllowedModels(slug string) map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	i := s.idx(slug)
+	if i < 0 || len(s.D.Providers[i].Models) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(s.D.Providers[i].Models))
+	for _, id := range s.D.Providers[i].Models {
+		m[id] = true
+	}
+	return m
 }

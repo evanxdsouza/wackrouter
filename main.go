@@ -253,6 +253,7 @@ func (s *Server) apiPutProvider(w http.ResponseWriter, r *http.Request) {
 		AuthHeader string      `json:"auth_header"`
 		AuthPrefix string      `json:"auth_prefix"`
 		Headers    *[]HeaderIn `json:"headers"`
+		Models     *[]string   `json:"models"`
 		Key        string      `json:"key"`
 		KeyLabel   string      `json:"key_label"`
 	}
@@ -262,7 +263,7 @@ func (s *Server) apiPutProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	p := Provider{ID: id, Name: in.Name, Kind: in.Kind, BaseURL: in.BaseURL, Enabled: in.Enabled, AuthHeader: in.AuthHeader, AuthPrefix: in.AuthPrefix}
-	if err := s.store.UpsertProvider(p, in.Headers); err != nil {
+	if err := s.store.UpsertProvider(p, in.Headers, in.Models); err != nil {
 		jsonErr(w, 400, err.Error())
 		return
 	}

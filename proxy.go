@@ -292,6 +292,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, who string) {
 			return
 		}
 	}
+	if allow := s.store.AllowedModels(slug); allow != nil && model != "" && !allow[model] {
+		oaiErr(w, 404, "model_not_allowed", "'"+model+"' is not on the allowlist for provider '"+slug+"'. Edit the list in Providers.")
+		return
+	}
 	if q := r.URL.RawQuery; q != "" {
 		rest += "?" + q
 	}
@@ -530,7 +534,11 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 				return
 			}
 			mu.Lock()
+			allow := s.store.AllowedModels(slug)
 			for _, m := range ids {
+				if allow != nil && !allow[m.ID] {
+					continue
+				}
 				list = append(list, item{slug + "/" + m.ID, "model", slug})
 				cat = append(cat, catItem{slug, m.ID, m.Meta})
 				meta[slug+"/"+m.ID] = m.Meta
