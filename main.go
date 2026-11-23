@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"io/fs"
@@ -20,6 +21,10 @@ var webFS embed.FS
 type Server struct {
 	store  *Store
 	logs   *Logs
+	stats  *Stats
+	cat    []catItem
+	catAt  time.Time
+	meta   map[string]ModelMeta
 	ship   *Shipper
 	client *http.Client
 	mcMu   sync.Mutex
@@ -61,12 +66,22 @@ func main() {
 			TLSHandshakeTimeout:   10 * time.Second,
 		}},
 		fails: map[string]*failInfo{},
+		meta:  map[string]ModelMeta{},
 	}
 	s.ship = NewShipper(st, s.client)
-	s.logs.hook = s.ship.Enqueue
+	s.stats = OpenStats(filepath.Join(dir, "stats.json"), s.logs.Recent(logCap), s.costOf)
+	s.logs.hook = func(e LogEntry) {
+		s.ship.Enqueue(e)
+		s.stats.Add(e, s.costOf(e))
+	}
+	go func() { // warm the model catalog so prices are known before the first request lands
+		time.Sleep(3 * time.Second)
+		s.catalog(context.Background())
+	}()
 	go func() {
 		for range time.Tick(30 * time.Second) {
 			st.Flush()
+			s.stats.Flush()
 		}
 	}()
 
@@ -112,6 +127,8 @@ func (s *Server) routes() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(s.buildModels(r.Context()))
 	}))
+	mux.HandleFunc("GET /api/model-stats", a(s.apiModelStats))
+	mux.HandleFunc("GET /api/usage", a(s.apiUsage))
 	mux.HandleFunc("POST /api/chat", a(s.apiChat))
 	mux.HandleFunc("POST /api/password", a(s.apiPassword))
 

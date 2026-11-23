@@ -139,15 +139,17 @@ async function refresh() { S = await api('GET', '/state'); render(); }
 const NAV = [
   ['providers', 'Providers', () => S.providers.length],
   ['access', 'Access', () => S.tokens.length],
+  ['models', 'Models'],
   ['playground', 'Playground'],
   ['activity', 'Activity'],
+  ['usage', 'Usage'],
   ['drains', 'Drains', () => S.sinks.length],
   ['settings', 'Settings'],
 ];
 
 function render() {
   clearInterval(pollTimer);
-  const views = { providers: pageProviders, access: pageAccess, playground: pagePlayground, activity: pageActivity, drains: pageDrains, settings: pageSettings };
+  const views = { providers: pageProviders, access: pageAccess, models: pageModels, playground: pagePlayground, activity: pageActivity, usage: pageUsage, drains: pageDrains, settings: pageSettings };
   const view = (views[page] || pageProviders)();
   $app.replaceChildren(h('div', { class: 'shell' },
     h('aside', { class: 'rail' },
@@ -558,6 +560,199 @@ function pageActivity() {
     stats, chart,
     h('div', { class: 'toolbar' }, provSel, h('label', { class: 'row small', for: 'errs' }, errBox, 'Errors only')),
     table,
+  ];
+}
+
+/* ---------- models ---------- */
+const mq = { hours: 24, sort: 'used', provider: '', q: '', used: null, limit: 48, data: null };
+const SORTS = [['used', 'Most used'], ['az', 'A to Z'], ['ttft', 'Fastest first token'], ['tps', 'Speed'], ['up', 'Uptime']];
+const fmtMs = ms => !ms ? '–' : ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : Math.round(ms) + ' ms';
+const fmtCtx = n => n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
+const money = n => n >= 100 ? '$' + n.toFixed(0) : n >= 0.01 ? '$' + n.toFixed(2) : n === 0 ? '$0.00' : '$' + n.toFixed(4);
+const rate = m => m.req ? (m.req - m.err) / m.req : null;
+
+function modelCard(m) {
+  const r = rate(m);
+  const chip = r == null ? h('span', { class: 'chip' }, 'no data')
+    : h('span', { class: 'chip ' + (r >= .95 ? 'ok' : r >= .7 ? 'warn' : 'bad') }, Math.round(r * 100) + '%');
+  const hours = mq.hours, now = Date.now();
+  const bars = Array.from({ length: hours }, (_, i) => {
+    const u = m.up && m.up[i], ok = u ? u[0] : 0, bad = u ? u[1] : 0;
+    const t = new Date(Math.ceil(now / 36e5) * 36e5 - (hours - i) * 36e5);
+    const label = `${t.toLocaleDateString(undefined, { weekday: 'short' })} ${t.getHours()}:00, ` + (ok + bad ? `${ok + bad} request${ok + bad === 1 ? '' : 's'}${bad ? ', ' + bad + ' failed' : ''}` : 'no traffic');
+    return h('i', { class: ok && bad ? 'warn' : bad ? 'bad' : ok ? 'ok' : '', title: label });
+  });
+  const failed = bars.filter(b => b.className === 'bad').length;
+  return h('article', { class: 'panel mcard' },
+    h('header', null,
+      h('div', null, h('div', { class: 'mid' }, m.model), h('div', { class: 'muted small' }, S.providers.find(p => p.id === m.provider)?.name || m.provider)),
+      chip),
+    h('div', { class: 'mmetrics' },
+      h('div', null, h('span', null, 'First token p50'), h('b', null, fmtMs(m.ttft_p50))),
+      h('div', null, h('span', null, 'First token p90'), h('b', null, fmtMs(m.ttft_p90))),
+      h('div', null, h('span', null, 'Speed'), h('b', null, m.tps ? Math.round(m.tps) + ' tok/s' : '–'))),
+    h('div', { class: 'uptime-row' },
+      h('div', { class: 'row small muted', style: 'justify-content:space-between' },
+        h('span', null, 'Uptime by hour'),
+        h('span', null, m.req ? `${m.req} request${m.req === 1 ? '' : 's'}${failed ? ', ' + failed + ' bad hour' + (failed === 1 ? '' : 's') : ''}` : 'quiet')),
+      h('div', { class: 'uptime', role: 'img', 'aria-label': 'Uptime by hour' }, bars)),
+    h('footer', { class: 'mfoot' },
+      h('span', { class: 'small muted' }, m.priced ? `in ${money(m.in)} / out ${money(m.out)} per 1M` : 'price not published',
+        m.ctx ? ` · ctx ${fmtCtx(m.ctx)}` : '', !m.listed ? ' · not in provider list' : ''),
+      h('span', { class: 'row' },
+        h('button', { class: 'btn quiet', onclick: () => copy(m.id, 'Model id copied') }, 'Copy id'),
+        h('button', { class: 'btn', onclick: () => { chatModel = m.id; chatMsgs = []; location.hash = 'playground'; } }, 'Try'))));
+}
+
+function pageModels() {
+  const summary = h('div', { class: 'msum' });
+  const grid = h('div', { class: 'mgrid' });
+  const more = h('div', { class: 'row', style: 'justify-content:center;margin:18px 0' });
+
+  const sortTabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Sort' });
+  const winTabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Window' });
+  const tabButtons = () => {
+    sortTabs.replaceChildren(...SORTS.map(([id, label]) => h('button', { role: 'tab', 'aria-selected': String(mq.sort === id), onclick: () => { mq.sort = id; mq.limit = 48; tabButtons(); paint(); } }, label)));
+    winTabs.replaceChildren(...[[24, '24 hours'], [72, '72 hours']].map(([n, label]) => h('button', { role: 'tab', 'aria-selected': String(mq.hours === n), onclick: () => { mq.hours = n; tabButtons(); load(); } }, label)));
+  };
+  tabButtons();
+
+  const provSel = h('select', { 'aria-label': 'Provider' }, h('option', { value: '' }, 'All providers'),
+    S.providers.map(p => h('option', { value: p.id, selected: mq.provider === p.id }, p.name)));
+  provSel.addEventListener('change', () => { mq.provider = provSel.value; mq.limit = 48; paint(); });
+  const search = h('input', { type: 'search', placeholder: 'Search models', 'aria-label': 'Search models', value: mq.q, style: 'max-width:240px' });
+  search.addEventListener('input', () => { mq.q = search.value; mq.limit = 48; paint(); });
+  const usedBox = h('input', { type: 'checkbox', id: 'usedonly' });
+  usedBox.addEventListener('change', () => { mq.used = usedBox.checked; mq.limit = 48; paint(); });
+
+  function paint() {
+    const d = mq.data;
+    if (!d) { grid.replaceChildren(h('div', { class: 'panel empty muted' }, 'Loading models…')); summary.replaceChildren(); more.replaceChildren(); return; }
+    if (mq.used == null) mq.used = d.requests > 0;
+    usedBox.checked = mq.used;
+    summary.replaceChildren(h('b', null, d.total.toLocaleString()), ' models · ', h('b', null, d.requests.toLocaleString()), ` requests · ${d.hours}h`);
+    const q = mq.q.trim().toLowerCase();
+    let rows = d.models.filter(m => (m.listed || m.req) && (!mq.provider || m.provider === mq.provider) && (!q || m.id.toLowerCase().includes(q)) && (!mq.used || m.req > 0));
+    const withData = (f, dir) => (a, b) => (a.req ? 0 : 1) - (b.req ? 0 : 1) || dir * (f(a) - f(b));
+    const cmp = {
+      used: (a, b) => b.req - a.req || a.id.localeCompare(b.id),
+      az: (a, b) => a.id.localeCompare(b.id),
+      ttft: (a, b) => (a.ttft_p50 ? 0 : 1) - (b.ttft_p50 ? 0 : 1) || a.ttft_p50 - b.ttft_p50 || a.id.localeCompare(b.id),
+      tps: (a, b) => (a.tps ? 0 : 1) - (b.tps ? 0 : 1) || b.tps - a.tps || a.id.localeCompare(b.id),
+      up: withData(m => -rate(m), 1),
+    }[mq.sort];
+    rows = rows.slice().sort(cmp);
+    const shown = rows.slice(0, mq.limit);
+    grid.replaceChildren(...(shown.length ? shown.map(modelCard) : [h('div', { class: 'panel empty' },
+      h('h2', null, d.total ? 'Nothing matches' : 'No models yet'),
+      h('p', { class: 'muted' }, d.total ? 'Try clearing the search, or untick “Used only” to see every model your providers offer.' : 'Add a provider with a working key and its models show up here on their own.'))]));
+    more.replaceChildren(rows.length > shown.length ? h('button', { class: 'btn', onclick: () => { mq.limit += 48; paint(); } }, `Show ${Math.min(48, rows.length - shown.length)} more (${rows.length - shown.length} left)`) : null);
+  }
+
+  async function load() {
+    try { mq.data = await api('GET', '/model-stats?hours=' + mq.hours); if (page === 'models') paint(); } catch (e) { if (!mq.data) toast(e.message, true); }
+  }
+  load();
+  pollTimer = setInterval(load, 20000);
+  paint();
+
+  return [
+    h('div', { class: 'page-head' },
+      h('div', null, h('h1', null, 'Models'), h('p', { class: 'muted' }, 'Every model your providers offer, with live speed and uptime from real traffic.')),
+      summary),
+    h('div', { class: 'toolbar' }, sortTabs, winTabs),
+    h('div', { class: 'toolbar' }, search, provSel, h('label', { class: 'row small', for: 'usedonly' }, usedBox, 'Used only')),
+    grid, more,
+  ];
+}
+
+/* ---------- usage ---------- */
+const uq = { days: 30, metric: 'req', data: null };
+
+function pageUsage() {
+  const stats = h('div', { class: 'stats' });
+  const chart = h('div', { class: 'panel chart' });
+  const heat = h('div', { class: 'panel chart' });
+  const byModel = h('div', { class: 'panel scroll' });
+  const byKey = h('div', { class: 'panel scroll' });
+  const tabs = h('div', { class: 'tabs', role: 'tablist' });
+
+  const metrics = { req: ['Requests', v => v.toLocaleString()], tok: ['Tokens', v => fmt(v)], cost: ['Spend', v => money(v)] };
+  function paintTabs() {
+    tabs.replaceChildren(
+      ...Object.entries(metrics).map(([id, [label]]) => h('button', { role: 'tab', 'aria-selected': String(uq.metric === id), onclick: () => { uq.metric = id; paintTabs(); paint(); } }, label)),
+      h('span', { style: 'flex:1' }),
+      ...[[7, '7 days'], [30, '30 days'], [90, '90 days']].map(([n, label]) => h('button', { role: 'tab', 'aria-selected': String(uq.days === n), onclick: () => { uq.days = n; paintTabs(); paint(); } }, label)));
+  }
+  paintTabs();
+
+  function paint() {
+    const d = uq.data;
+    if (!d) { stats.replaceChildren(h('div', { class: 'panel stat' }, h('b', null, '…'), h('span', { class: 'muted small' }, 'Loading'))); return; }
+    const L = d.lifetime;
+    stats.replaceChildren(...[
+      ['Requests', L.req.toLocaleString(), L.err ? `${L.err.toLocaleString()} failed` : 'none failed'],
+      ['Estimated spend', money(L.cost), 'from published prices'],
+      ['Tokens in', L.in.toLocaleString(), 'prompt side'],
+      ['Tokens out', L.out.toLocaleString(), 'completions'],
+      ['Models used', String(L.models), 'distinct provider/model'],
+      ['Current streak', L.streak + (L.streak === 1 ? ' day' : ' days'), 'in a row with a request'],
+      ['First request', L.first ? ago(L.first / 1000) : 'none yet', L.first ? new Date(L.first).toLocaleDateString() : ''],
+    ].map(([k, v, sub]) => h('div', { class: 'panel stat' }, h('b', null, v), h('span', { class: 'muted small' }, k), h('div', { class: 'muted small' }, sub))));
+
+    // daily chart
+    const days = d.daily.slice(-uq.days);
+    const val = r => uq.metric === 'req' ? r.req : uq.metric === 'tok' ? r.in + r.out : r.cost;
+    const max = Math.max(...days.map(val), 0);
+    const W = 600, H = 120, base = H - 2, bw = W / days.length;
+    const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': metrics[uq.metric][0] + ' per day' });
+    days.forEach((r, i) => {
+      const v = val(r), hh = max ? (v / max) * (base - 6) : 0;
+      const g = svg('g', null, svg('title', null, `${r.day}: ${metrics[uq.metric][1](v)}${r.err ? ', ' + r.err + ' failed' : ''}`),
+        svg('rect', { x: i * bw, y: 0, width: bw, height: base, fill: 'transparent' }));
+      if (v <= 0) g.append(svg('rect', { x: i * bw + 1, y: base - 2, width: Math.max(1, bw - 2), height: 2, rx: 1, style: 'fill:var(--line)' }));
+      else g.append(svg('rect', { x: i * bw + 1, y: base - hh, width: Math.max(1, bw - 2), height: Math.max(3, hh), rx: Math.min(3, bw / 3), style: 'fill:var(--lemon);stroke:var(--edge);stroke-width:1.5' }));
+      s.append(g);
+    });
+    chart.replaceChildren(
+      h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' },
+        h('h3', null, 'Daily ' + metrics[uq.metric][0].toLowerCase()),
+        h('span', { class: 'muted small' }, max ? 'peak ' + metrics[uq.metric][1](max) : 'no traffic in this range')),
+      tabs, s,
+      h('div', { class: 'axis muted small' }, h('span', null, days[0].day), h('span', null, 'today (UTC days)')));
+
+    // heatmap, local weekday x hour over the last 7 days
+    const cells = Array.from({ length: 7 }, () => Array(24).fill(0));
+    for (const [eh, n] of Object.entries(d.hours)) { const t = new Date(+eh * 36e5); cells[(t.getDay() + 6) % 7][t.getHours()] += n; }
+    const hmax = Math.max(1, ...cells.flat());
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const grid = h('div', { class: 'heat', role: 'img', 'aria-label': 'Requests by weekday and hour, last 7 days' });
+    grid.append(h('span'), ...Array.from({ length: 24 }, (_, i) => h('span', { class: 'muted hl' }, i % 6 === 0 ? i : '')));
+    names.forEach((n, r) => {
+      grid.append(h('span', { class: 'muted' }, n));
+      cells[r].forEach((c, hr) => grid.append(h('i', { title: `${n} ${hr}:00, ${c} request${c === 1 ? '' : 's'}`, style: c ? `background:color-mix(in srgb, var(--lemon) ${25 + Math.round(75 * c / hmax)}%, var(--sunk));border-color:var(--edge)` : '' })));
+    });
+    heat.replaceChildren(h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:8px' }, h('h3', null, 'When you use it'), h('span', { class: 'muted small' }, 'last 7 days, your local time')), grid);
+
+    const table = (rows, cols) => rows.length ? h('table', null,
+      h('thead', null, h('tr', null, cols.map(([t], i) => h('th', { class: i ? 'num' : '' }, t)))),
+      h('tbody', null, rows.map(r => h('tr', null, cols.map(([, f], i) => h('td', { class: i ? 'num' : '' }, f(r))))))) :
+      h('div', { class: 'empty muted' }, 'Nothing in the last 7 days.');
+    const num = k => r => r[k].toLocaleString();
+    byModel.replaceChildren(h('div', { class: 'phead' }, h('h3', null, 'Last 7 days by model')),
+      table(d.by_model, [['Model', r => h('code', null, r.provider + '/' + r.model)], ['Requests', num('req')], ['Tokens in', num('in')], ['Tokens out', num('out')], ['Cost', r => money(r.cost)]]));
+    byKey.replaceChildren(h('div', { class: 'phead' }, h('h3', null, 'Last 7 days by key')),
+      table(d.by_key, [['Key', r => h('span', null, h('code', null, r.provider), ' ', h('span', { class: 'muted' }, r.key || 'unlabelled'))], ['Requests', num('req')], ['Failed', num('err')], ['Tokens', r => (r.in + r.out).toLocaleString()], ['Cost', r => money(r.cost)]]));
+  }
+
+  async function load() { try { uq.data = await api('GET', '/usage'); if (page === 'usage') paint(); } catch (e) { if (!uq.data) toast(e.message, true); } }
+  load();
+  pollTimer = setInterval(load, 30000);
+  paint();
+
+  return [
+    h('div', { class: 'page-head' }, h('div', null, h('h1', null, 'Usage'), h('p', { class: 'muted' }, 'Lifetime totals that outlive the request log. Spend is an estimate: only providers that publish per-token prices count, and free tiers show $0.'))),
+    stats, chart, heat, byModel, h('div', { style: 'height:16px' }), byKey,
   ];
 }
 

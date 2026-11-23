@@ -26,13 +26,14 @@ type LogEntry struct {
 	Key      string `json:"key"`
 	Status   int    `json:"status"`
 	Ms       int64  `json:"ms"`
+	Ttft     int64  `json:"ttft,omitempty"` // ms until the first response byte
 	In       int    `json:"in"`
 	Out      int    `json:"out"`
 	Stream   bool   `json:"stream"`
 	Err      string `json:"err,omitempty"`
 }
 
-const logCap = 2000
+const logCap = 10000
 
 type Logs struct {
 	mu    sync.Mutex
@@ -389,6 +390,12 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
+			if e.Ttft == 0 {
+				e.Ttft = time.Since(start).Milliseconds()
+				if e.Ttft == 0 {
+					e.Ttft = 1
+				}
+			}
 			w.Write(buf[:n])
 			cap.add(buf[:n])
 			if fl != nil {
@@ -415,7 +422,9 @@ type modelsCache struct {
 func (s *Server) invalidateModels() {
 	s.mcMu.Lock()
 	s.mc = nil
+	s.cat = nil
 	s.mcMu.Unlock()
+	go s.catalog(context.Background()) // refresh prices and context sizes in the background
 }
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +445,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-func (s *Server) providerModels(ctx context.Context, slug string) ([]string, error) {
+func (s *Server) providerModels(ctx context.Context, slug string) ([]modelInfo, error) {
 	prov, ok := s.store.GetProvider(slug)
 	if !ok {
 		return nil, io.EOF
@@ -463,7 +472,7 @@ func (s *Server) providerModels(ctx context.Context, slug string) ([]string, err
 			// The endpoint answered without rejecting the key, so treat as reachable.
 			resp.Body.Close()
 			s.store.NoteKey(k.ID, 200, "")
-			return []string{}, nil
+			return []modelInfo{}, nil
 		}
 		s.store.NoteKey(k.ID, resp.StatusCode, "")
 		if resp.StatusCode < 300 {
@@ -478,16 +487,18 @@ func (s *Server) providerModels(ctx context.Context, slug string) ([]string, err
 	}
 	defer resp.Body.Close()
 	var out struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []map[string]any `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(out.Data))
+	ids := make([]modelInfo, 0, len(out.Data))
 	for _, m := range out.Data {
-		ids = append(ids, strings.TrimPrefix(m.ID, "models/"))
+		id, _ := m["id"].(string)
+		if id == "" {
+			continue
+		}
+		ids = append(ids, modelInfo{strings.TrimPrefix(id, "models/"), parseMeta(m)})
 	}
 	return ids, nil
 }
@@ -502,6 +513,8 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	list := []item{}
+	var cat []catItem
+	meta := map[string]ModelMeta{}
 	for k := range st.Aliases {
 		list = append(list, item{k, "model", "alias"})
 	}
@@ -517,13 +530,18 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 				return
 			}
 			mu.Lock()
-			for _, id := range ids {
-				list = append(list, item{slug + "/" + id, "model", slug})
+			for _, m := range ids {
+				list = append(list, item{slug + "/" + m.ID, "model", slug})
+				cat = append(cat, catItem{slug, m.ID, m.Meta})
+				meta[slug+"/"+m.ID] = m.Meta
 			}
 			mu.Unlock()
 		}(p.ID)
 	}
 	wg.Wait()
+	s.mcMu.Lock()
+	s.cat, s.catAt, s.meta = cat, time.Now(), meta
+	s.mcMu.Unlock()
 	b, _ := json.Marshal(map[string]any{"object": "list", "data": list})
 	return b
 }
