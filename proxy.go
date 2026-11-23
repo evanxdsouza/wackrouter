@@ -458,6 +458,13 @@ func (s *Server) providerModels(ctx context.Context, slug string) ([]string, err
 			resp = nil
 			continue
 		}
+		if resp.StatusCode == 404 || resp.StatusCode == 405 {
+			// Some providers (e.g. Cloudflare Workers AI) have no model list.
+			// The endpoint answered without rejecting the key, so treat as reachable.
+			resp.Body.Close()
+			s.store.NoteKey(k.ID, 200, "")
+			return []string{}, nil
+		}
 		s.store.NoteKey(k.ID, resp.StatusCode, "")
 		if resp.StatusCode < 300 {
 			break
