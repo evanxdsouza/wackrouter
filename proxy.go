@@ -410,7 +410,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 			}
 			return false
 		}
-		if c := resp.StatusCode; c == 429 || c == 401 || c == 403 || c == 404 || c >= 500 {
+		if c := resp.StatusCode; c == 429 || c == 401 || c == 402 || c == 403 || c == 404 || c == 408 || c >= 500 {
 			var c2 capture
 			bb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
 			c2.add(bb)
