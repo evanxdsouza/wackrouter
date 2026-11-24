@@ -490,10 +490,18 @@ func (s *Server) providerModels(ctx context.Context, slug string) ([]modelInfo, 
 		return nil, err
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
 	var out struct {
 		Data []map[string]any `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out); err != nil {
+	if t := bytes.TrimSpace(raw); len(t) > 0 && t[0] == '[' {
+		if err := json.Unmarshal(t, &out.Data); err != nil {
+			return nil, err
+		}
+	} else if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
 	ids := make([]modelInfo, 0, len(out.Data))
