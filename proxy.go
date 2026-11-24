@@ -358,7 +358,15 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 	var resp *http.Response
 	var lastErr error
 	for i, k := range keys {
-		req, _ := http.NewRequestWithContext(r.Context(), r.Method, target, bytes.NewReader(body))
+		ctx := r.Context()
+		var timer *time.Timer
+		if soft { // a provider that never answers shouldn't stall the fall-over
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			defer cancel()
+			timer = time.AfterFunc(20*time.Second, cancel)
+		}
+		req, _ := http.NewRequestWithContext(ctx, r.Method, target, bytes.NewReader(body))
 		for name, vv := range r.Header {
 			switch http.CanonicalHeaderKey(name) {
 			case "Host", "Content-Length", "Accept-Encoding", "Cookie", "Authorization", "X-Api-Key", "X-Goog-Api-Key", "X-Wackrouter":
@@ -372,6 +380,9 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 		setAuth(req.Header, prov, extra, rest, k.Secret)
 
 		resp, lastErr = s.client.Do(req)
+		if timer != nil {
+			timer.Stop()
+		}
 		e.Key = k.Label
 		if lastErr != nil {
 			s.store.NoteKey(k.ID, 0, lastErr.Error())
