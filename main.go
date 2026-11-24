@@ -25,6 +25,7 @@ type Server struct {
 	cat    []catItem
 	catAt  time.Time
 	meta   map[string]ModelMeta
+	route  map[string][]rc
 	ship   *Shipper
 	client *http.Client
 	mcMu   sync.Mutex

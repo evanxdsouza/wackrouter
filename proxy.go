@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -255,7 +256,7 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	if rest == "/v1" || strings.HasPrefix(rest, "/v1/") {
 		rest = strings.TrimPrefix(rest, "/v1")
 	}
-	s.forward(w, r, who, parts[0], rest, body, peekModel(body))
+	s.forward(w, r, who, parts[0], rest, body, peekModel(body), false)
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, who string) {
@@ -270,6 +271,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, who string) {
 		return
 	}
 	slug, model := "", ""
+	var bodyMap map[string]json.RawMessage
 	if len(body) > 0 && strings.Contains(r.Header.Get("Content-Type"), "json") {
 		var m map[string]json.RawMessage
 		if json.Unmarshal(body, &m) == nil {
@@ -278,12 +280,30 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, who string) {
 				json.Unmarshal(raw, &mv)
 			}
 			if mv != "" {
+				bodyMap = m
 				slug, model = s.store.Resolve(mv)
 				if model != mv {
 					m["model"], _ = json.Marshal(model)
 					body, _ = json.Marshal(m)
 				}
 			}
+		}
+	}
+	if slug == "" && model != "" && bodyMap != nil {
+		// Bare model name: pick the provider ourselves, falling over to the next on failure.
+		if cands := s.rank(s.candidates(r.Context(), model), model); len(cands) > 0 {
+			q := ""
+			if r.URL.RawQuery != "" {
+				q = "?" + r.URL.RawQuery
+			}
+			for i, c := range cands {
+				bodyMap["model"], _ = json.Marshal(c.Up)
+				b2, _ := json.Marshal(bodyMap)
+				if s.forward(w, r, who, c.Slug, rest+q, b2, c.Up, i < len(cands)-1) {
+					return
+				}
+			}
+			return
 		}
 	}
 	if slug == "" {
@@ -299,12 +319,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, who string) {
 	if q := r.URL.RawQuery; q != "" {
 		rest += "?" + q
 	}
-	s.forward(w, r, who, slug, rest, body, model)
+	s.forward(w, r, who, slug, rest, body, model, false)
 }
 
 // ---- the forwarder ---------------------------------------------------------------------
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest string, body []byte, model string) {
+// forward sends one request to one provider. With soft set it writes nothing and returns false
+// when the provider failed in a way another provider might not (so the caller can fall over).
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest string, body []byte, model string, soft bool) bool {
 	start := time.Now()
 	e := LogEntry{T: start.UnixMilli(), Who: who, Provider: slug, Model: model, Path: strings.SplitN(rest, "?", 2)[0]}
 	defer func() {
@@ -315,14 +337,20 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 	prov, ok := s.store.GetProvider(slug)
 	if !ok || !prov.Enabled {
 		e.Status, e.Err = 404, "provider unavailable"
+		if soft {
+			return false
+		}
 		oaiErr(w, 404, "unknown_provider", "Provider '"+slug+"' is not available.")
-		return
+		return true
 	}
 	keys, err := s.store.PickKeys(slug)
 	if err != nil {
 		e.Status, e.Err = 503, err.Error()
+		if soft {
+			return false
+		}
 		oaiErr(w, 503, "no_keys", slug+": "+err.Error())
-		return
+		return true
 	}
 
 	target := prov.BaseURL + rest
@@ -363,6 +391,23 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 		}
 		break
 	}
+	if soft && r.Context().Err() == nil {
+		if resp == nil {
+			e.Status, e.Err = 502, "upstream unreachable"
+			if lastErr != nil {
+				e.Err = lastErr.Error()
+			}
+			return false
+		}
+		if c := resp.StatusCode; c == 429 || c == 401 || c == 403 || c == 404 || c >= 500 {
+			var c2 capture
+			bb, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
+			c2.add(bb)
+			resp.Body.Close()
+			e.Status, e.Err = c, c2.errText()
+			return false
+		}
+	}
 	if resp == nil {
 		msg := "upstream unreachable"
 		if lastErr != nil {
@@ -371,10 +416,10 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 		e.Status, e.Err = 502, msg
 		if r.Context().Err() == context.Canceled {
 			e.Status = 499
-			return
+			return true
 		}
 		oaiErr(w, 502, "upstream_error", msg)
-		return
+		return true
 	}
 	defer resp.Body.Close()
 
@@ -414,6 +459,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, who, slug, rest
 	if resp.StatusCode >= 400 {
 		e.Err = cap.errText()
 	}
+	return true
 }
 
 // ---- /v1/models aggregation ---------------------------------------------------------------
@@ -526,6 +572,7 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 	var wg sync.WaitGroup
 	list := []item{}
 	var cat []catItem
+	var flat []rc
 	meta := map[string]ModelMeta{}
 	for k := range st.Aliases {
 		list = append(list, item{k, "model", "alias"})
@@ -547,7 +594,7 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 				if allow != nil && !allow[m.ID] {
 					continue
 				}
-				list = append(list, item{slug + "/" + m.ID, "model", slug})
+				flat = append(flat, rc{slug, m.ID})
 				cat = append(cat, catItem{slug, m.ID, m.Meta})
 				meta[slug+"/"+m.ID] = m.Meta
 			}
@@ -555,8 +602,17 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 		}(p.ID)
 	}
 	wg.Wait()
+	route, disp := buildRoutes(flat, st.Providers)
+	ids := make([]string, 0, len(disp))
+	for _, d := range disp {
+		ids = append(ids, d)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		list = append(list, item{id, "model", "auto"})
+	}
 	s.mcMu.Lock()
-	s.cat, s.catAt, s.meta = cat, time.Now(), meta
+	s.cat, s.catAt, s.meta, s.route = cat, time.Now(), meta, route
 	s.mcMu.Unlock()
 	b, _ := json.Marshal(map[string]any{"object": "list", "data": list})
 	return b

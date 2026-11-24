@@ -209,7 +209,7 @@ function pageProviders() {
   out.push(h('div', { class: 'endpoint' },
     h('div', { class: 'url' }, url),
     h('button', { class: 'btn', onclick: () => copy(url, 'Address copied') }, 'Copy address'),
-    h('p', { class: 'note' }, 'Point every app here. Use it as the base URL in any OpenAI-compatible tool, with an access token as the API key. Name models as provider/model, like openai/gpt-4o.')));
+    h('p', { class: 'note' }, 'Point every app here. Use it as the base URL in any OpenAI-compatible tool, with an access token as the API key. Just name the model, like gemma-4-31b-it — Wackrouter picks a working provider and falls over to the next one on errors. provider/model still works if you want to pin one.')));
 
   if (!S.providers.length) {
     out.push(h('div', { class: 'panel empty' },
@@ -418,7 +418,7 @@ function pageAccess() {
 /* ---------- playground ---------- */
 function pagePlayground() {
   const list = h('datalist', { id: 'models' });
-  const model = h('input', { type: 'text', list: 'models', class: 'mono', placeholder: 'provider/model, e.g. openai/gpt-4o-mini', 'aria-label': 'Model', value: chatModel, autocomplete: 'off' });
+  const model = h('input', { type: 'text', list: 'models', class: 'mono', placeholder: 'model, e.g. google/gemma-4-31b-it', 'aria-label': 'Model', value: chatModel, autocomplete: 'off' });
   model.addEventListener('input', () => { chatModel = model.value; });
   api('GET', '/models').then(r => {
     const ids = (r.data || []).map(m => m.id).sort();
