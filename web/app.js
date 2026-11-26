@@ -598,7 +598,7 @@ function modelCard(m) {
         h('span', null, m.req ? `${m.req} request${m.req === 1 ? '' : 's'}${failed ? ', ' + failed + ' bad hour' + (failed === 1 ? '' : 's') : ''}` : 'quiet')),
       h('div', { class: 'uptime', role: 'img', 'aria-label': 'Uptime by hour' }, bars)),
     h('footer', { class: 'mfoot' },
-      h('span', { class: 'small muted' }, m.priced ? `in ${money(m.in)} / out ${money(m.out)} per 1M` : 'price not published',
+      h('span', { class: 'small muted' }, m.priced ? `in ${money(m.in || 0)} / out ${money(m.out || 0)} per 1M` : 'price not published',
         m.ctx ? ` · ctx ${fmtCtx(m.ctx)}` : '', !m.listed ? ' · not in provider list' : ''),
       h('span', { class: 'row' },
         h('button', { class: 'btn quiet', onclick: () => copy(m.id, 'Model id copied') }, 'Copy id'),
