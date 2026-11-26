@@ -289,6 +289,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, who string) {
 			}
 		}
 	}
+	if allow := s.store.AllowSet(); allow != nil && model != "" && bodyMap != nil && !allow[canon(model)] {
+		oaiErr(w, 404, "model_not_allowed", "'"+model+"' is not on the Wackrouter allowlist. Ask for one of the models in GET /v1/models.")
+		return
+	}
 	if slug == "" && model != "" && bodyMap != nil {
 		// Bare model name: pick the provider ourselves, falling over to the next on failure.
 		if cands := s.rank(s.candidates(r.Context(), model), model); len(cands) > 0 {
@@ -614,6 +618,19 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 	}
 	wg.Wait()
 	route, disp := buildRoutes(flat, st.Providers)
+	names := make([]string, 0, len(disp))
+	for _, d := range disp {
+		names = append(names, d)
+	}
+	sort.Strings(names)
+	if allow := s.store.AllowSet(); allow != nil {
+		for k := range route {
+			if !allow[k] {
+				delete(route, k)
+				delete(disp, k)
+			}
+		}
+	}
 	ids := make([]string, 0, len(disp))
 	for _, d := range disp {
 		ids = append(ids, d)
@@ -623,7 +640,7 @@ func (s *Server) buildModels(ctx context.Context) []byte {
 		list = append(list, item{id, "model", "auto"})
 	}
 	s.mcMu.Lock()
-	s.cat, s.catAt, s.meta, s.route = cat, time.Now(), meta, route
+	s.cat, s.catAt, s.meta, s.route, s.names = cat, time.Now(), meta, route, names
 	s.mcMu.Unlock()
 	b, _ := json.Marshal(map[string]any{"object": "list", "data": list})
 	return b

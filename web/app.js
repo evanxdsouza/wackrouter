@@ -867,6 +867,26 @@ function pageSettings() {
     h('button', { class: 'btn quiet danger', onclick: () => { rows.splice(i, 1); if (!rows.length) rows.push(['', '']); paintAliases(); } }, 'Remove'))));
   paintAliases();
 
+  const allowBox = h('div', null, h('p', { class: 'muted' }, 'Loading models…'));
+  api('GET', '/allow').then(d => {
+    const on = new Set(d.allow || []);
+    const names = [...new Set([...(d.allow || []), ...(d.available || [])])].sort();
+    const canonOf = n => n.toLowerCase().replace(/:free$/, '').split('/').pop();
+    const q = h('input', { type: 'search', placeholder: 'Filter models', 'aria-label': 'Filter models' });
+    const list = h('div', { style: 'max-height:320px;overflow:auto;margin:8px 0' });
+    const paint = () => list.replaceChildren(...names.filter(n => n.toLowerCase().includes(q.value.toLowerCase())).map(n => {
+      const k = canonOf(n);
+      return h('label', { style: 'display:flex;gap:8px;align-items:center;padding:2px 0' },
+        h('input', { type: 'checkbox', checked: on.has(k), onchange: e => { e.target.checked ? on.add(k) : on.delete(k); count.textContent = on.size + ' allowed'; } }),
+        h('span', { class: 'mono' }, n));
+    }));
+    const count = h('span', { class: 'muted' }, on.size + ' allowed');
+    q.addEventListener('input', paint);
+    paint();
+    allowBox.replaceChildren(q, list, h('div', { class: 'row' }, count,
+      h('button', { class: 'btn primary', onclick: () => act(() => api('PUT', '/allow', { models: [...on] }), 'Allowlist saved') }, 'Save allowlist')));
+  }).catch(e => allowBox.replaceChildren(h('p', { class: 'muted' }, e.message)));
+
   const cur = h('input', { type: 'password', autocomplete: 'current-password', required: true, 'aria-label': 'Current password' });
   const nw = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: 8, 'aria-label': 'New password' });
 
@@ -876,6 +896,10 @@ function pageSettings() {
       h('h2', null, 'Default provider'),
       h('p', { class: 'muted' }, 'Used when a request names a model without a provider prefix.'),
       h('div', { style: 'max-width:340px' }, def)),
+    h('section', { class: 'panel section' },
+      h('h2', null, 'Model allowlist'),
+      h('p', { class: 'muted' }, 'Only these models are offered and accepted. Wackrouter picks the provider for each one and falls over to the next if it fails. Leave everything unticked to allow every model.'),
+      allowBox),
     h('section', { class: 'panel section' },
       h('h2', null, 'Model aliases'),
       h('p', { class: 'muted' }, 'Short names that point at a real model. Apps ask for “fast”, you decide what that means.'),

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,7 @@ type Data struct {
 	Tokens          []Token           `json:"tokens"`
 	Aliases         map[string]string `json:"aliases"`
 	DefaultProvider string            `json:"default_provider"`
+	Allow           []string          `json:"allow,omitempty"` // global model allowlist (canonical names); empty = every model
 	Sinks           []Sink            `json:"sinks"`
 	PassHash        string            `json:"pass_hash,omitempty"`
 	PassSalt        string            `json:"pass_salt,omitempty"`
@@ -537,6 +539,37 @@ func (s *Store) SetAliases(a map[string]string) error {
 	return s.save()
 }
 
+// AllowSet returns the global allowlist as a set of canonical names, or nil when everything is allowed.
+func (s *Store) AllowSet() map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.D.Allow) == 0 {
+		return nil
+	}
+	m := map[string]bool{}
+	for _, a := range s.D.Allow {
+		m[canon(a)] = true
+	}
+	return m
+}
+
+func (s *Store) SetAllow(a []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range a {
+		k := canon(v)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	s.D.Allow = out
+	return s.save()
+}
+
 func (s *Store) SetDefault(pid string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -658,6 +691,7 @@ type State struct {
 	Tokens    []apiToken        `json:"tokens"`
 	Aliases   map[string]string `json:"aliases"`
 	Default   string            `json:"default_provider"`
+	Allow     []string          `json:"allow"`
 	Sinks     []apiSink         `json:"sinks"`
 	EnvPass   bool              `json:"env_password"`
 }
@@ -665,7 +699,7 @@ type State struct {
 func (s *Store) Snapshot() State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	st := State{Providers: []apiProvider{}, Tokens: []apiToken{}, Aliases: map[string]string{}, Default: s.D.DefaultProvider, EnvPass: os.Getenv("WACKROUTER_PASSWORD") != "", Sinks: s.sinkSnapshot()}
+	st := State{Providers: []apiProvider{}, Tokens: []apiToken{}, Aliases: map[string]string{}, Default: s.D.DefaultProvider, Allow: append([]string{}, s.D.Allow...), EnvPass: os.Getenv("WACKROUTER_PASSWORD") != "", Sinks: s.sinkSnapshot()}
 	for k, v := range s.D.Aliases {
 		st.Aliases[k] = v
 	}

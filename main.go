@@ -26,6 +26,7 @@ type Server struct {
 	catAt  time.Time
 	meta   map[string]ModelMeta
 	route  map[string][]rc
+	names  []string // every model name the providers offer, before the allowlist
 	ship   *Shipper
 	client *http.Client
 	mcMu   sync.Mutex
@@ -122,6 +123,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/tokens/{id}", a(s.apiDelToken))
 	mux.HandleFunc("PUT /api/aliases", a(s.apiAliases))
 	mux.HandleFunc("PUT /api/default", a(s.apiDefault))
+	mux.HandleFunc("PUT /api/allow", a(s.apiAllow))
+	mux.HandleFunc("GET /api/allow", a(s.apiAllowGet))
 	mux.HandleFunc("GET /api/logs", a(func(w http.ResponseWriter, r *http.Request) { jsonOut(w, s.logs.Recent(1000)) }))
 	mux.HandleFunc("DELETE /api/logs", a(func(w http.ResponseWriter, r *http.Request) { s.logs.Clear(); jsonOut(w, ok{}) }))
 	mux.HandleFunc("GET /api/models", a(func(w http.ResponseWriter, r *http.Request) {
@@ -485,4 +488,32 @@ func (s *Server) apiTestSink(w http.ResponseWriter, r *http.Request) {
 		res["error"] = err.Error()
 	}
 	jsonOut(w, res)
+}
+
+func (s *Server) apiAllow(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Models []string `json:"models"`
+	}
+	if readJSON(r, &in) != nil {
+		jsonErr(w, 400, "bad json")
+		return
+	}
+	if err := s.store.SetAllow(in.Models); err != nil {
+		jsonErr(w, 400, err.Error())
+		return
+	}
+	s.invalidateModels()
+	s.mcMu.Lock()
+	s.route = nil
+	s.mcMu.Unlock()
+	jsonOut(w, ok{})
+}
+
+// apiAllowGet returns the allowlist plus every model name the providers currently offer.
+func (s *Server) apiAllowGet(w http.ResponseWriter, r *http.Request) {
+	s.buildModels(r.Context())
+	s.mcMu.Lock()
+	names := append([]string{}, s.names...)
+	s.mcMu.Unlock()
+	jsonOut(w, map[string]any{"allow": s.store.Snapshot().Allow, "available": names})
 }
